@@ -1,0 +1,20 @@
+{
+  "name": "flibber-protocol",
+  "version": "1.0.0",
+  "description": "FLIBBER - Cross-chain Liquidity Slotting Protocol",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:testnet": "hardhat run scripts/deploy.js --network base-sepolia",
+    "deploy:mainnet": "hardhat run scripts/deploy.js --network base"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^3.0.0",
+    "hardhat": "^2.19.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0",
+    "@layerzerolabs/lz-evm-sdk-v2": "^2.0.0",
+    "@account-abstraction/contracts": "^0.6.0"
+  }
+}
