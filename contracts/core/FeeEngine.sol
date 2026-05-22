@@ -119,7 +119,7 @@ contract FeeEngine is AccessControl, ReentrancyGuard {
 
         // 40% — LPs via LiquidityPool
         if (toLPs > 0) {
-            IERC20(token).safeApprove(address(liquidityPool), toLPs);
+            IERC20(token).forceApprove(address(liquidityPool), toLPs);
             liquidityPool.distributeFee(token, toLPs);
         }
 

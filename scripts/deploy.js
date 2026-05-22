@@ -74,7 +74,7 @@ async function main() {
 
   // ── 7. Governance ───────────────────────────────────────────────────────
   console.log("7️⃣  Deploying FlibberGovernance...");
-  const FlibberGovernance = await ethers.getContractFactory("FlibberGovernance");
+  const FlibberGovernance = await ethers.getContractFactory("contracts/governance/FlibberGovernance.sol:FlibberGovernance");
   const governance = await FlibberGovernance.deploy(deployed.fibStaking);
   await governance.waitForDeployment();
   deployed.governance = await governance.getAddress();

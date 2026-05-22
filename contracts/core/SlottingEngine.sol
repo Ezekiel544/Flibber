@@ -238,7 +238,7 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
             ? s.amountIn - s.feeAmount
             : s.amountIn;
 
-        IERC20(s.tokenIn).safeApprove(address(pool), principalToPool);
+        IERC20(s.tokenIn).forceApprove(address(pool), principalToPool);
         pool.reimburseSlot(s.tokenIn, principalToPool);
 
         // Distribute fee
@@ -269,7 +269,7 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
             ? s.amountIn - s.feeAmount
             : s.amountIn;
 
-        IERC20(s.tokenIn).safeApprove(address(pool), principalToPool);
+        IERC20(s.tokenIn).forceApprove(address(pool), principalToPool);
         pool.reimburseSlot(s.tokenIn, principalToPool);
 
         // Distribute fee
@@ -280,7 +280,7 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
 
     function _distributeFee(address feeToken, uint256 feeAmount) internal {
         if (feeAmount == 0) return;
-        IERC20(feeToken).safeApprove(address(feeEngine), feeAmount);
+        IERC20(feeToken).forceApprove(address(feeEngine), feeAmount);
         feeEngine.collectAndDistribute(feeToken, feeAmount);
     }
 

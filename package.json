@@ -13,8 +13,9 @@
     "hardhat": "^2.19.0"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.0.0",
+    "@account-abstraction/contracts": "^0.6.0",
     "@layerzerolabs/lz-evm-sdk-v2": "^2.0.0",
-    "@account-abstraction/contracts": "^0.6.0"
+    "@openzeppelin/contracts": "^5.0.2",
+    "dotenv": "^17.4.2"
   }
 }
