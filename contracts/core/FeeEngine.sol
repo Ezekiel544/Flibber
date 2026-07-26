@@ -14,6 +14,11 @@ import "./LiquidityPool.sol";
  *         40% → LP stakers (via LiquidityPool.distributeFee)
  *         40% → Treasury
  *         20% → Burned (via FIBToken.burnFee)
+ *
+ * @dev Fee is ALWAYS collected in FIB. No other token accepted.
+ *      calculateFeeInFIB() is a placeholder — once PriceOracle.sol
+ *      is live it will convert USD-denominated fees into the correct
+ *      FIB amount using real market price.
  */
 contract FeeEngine is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -33,7 +38,7 @@ contract FeeEngine is AccessControl, ReentrancyGuard {
     uint256 public treasuryShare = 40; // 40% to treasury
     uint256 public burnShare     = 20; // 20% burned
 
-    // Protocol fee rate: 20 = 0.20% (basis points * 10)
+    // Protocol fee rate: 20 = 0.20% (in basis points scaled ×10)
     uint256 public feeRateBps = 20; // 0.20%
 
     uint256 public totalFeesCollected;
@@ -45,7 +50,7 @@ contract FeeEngine is AccessControl, ReentrancyGuard {
     // EVENTS
     // ─────────────────────────────────────────────
 
-    event FeeCollected(address indexed token, uint256 totalFee, uint256 toBurn, uint256 toTreasury, uint256 toLPs);
+    event FeeCollected(uint256 fibAmount, uint256 toBurn, uint256 toTreasury, uint256 toLPs);
     event FeeRateUpdated(uint256 newRateBps);
     event FeeSplitUpdated(uint256 lpShare, uint256 treasuryShare, uint256 burnShare);
     event TreasuryUpdated(address newTreasury);
@@ -72,28 +77,53 @@ contract FeeEngine is AccessControl, ReentrancyGuard {
     }
 
     // ─────────────────────────────────────────────
-    // FEE COLLECTION
+    // FEE CALCULATION
     // ─────────────────────────────────────────────
 
     /**
-     * @notice Calculate fee for a given slot amount
-     * @param amount The slot principal amount
-     * @return fee   The fee in the same token denomination
+     * @notice Calculate fee for a given slot amount.
+     * @dev Used by SlottingEngine to know how much FIB to pull from user.
+     * @param amount  The slot principal (in tokenIn units)
+     * @return fee    The fee in the same unit denomination
      */
     function calculateFee(uint256 amount) public view returns (uint256) {
         return (amount * feeRateBps) / 10_000;
     }
 
     /**
-     * @notice Collect and distribute fee from a completed slot
-     * @dev Called by SlottingEngine after every successful slot
-     * @param token      The asset the fee is denominated in
-     * @param feeAmount  Total fee to distribute
+     * @notice Future hook for oracle-based FIB fee conversion.
+     * @dev Once PriceOracle.sol is live, replace the body with:
+     *
+     *      uint256 usdFee = (usdAmount * feeRateBps) / 10_000;
+     *      uint256 fibPrice = oracle.getFIBPriceUSD(); // e.g. 1e18 = $1.00
+     *      return (usdFee * 1e18) / fibPrice;
+     *
+     *      For now it mirrors calculateFee() — works correctly only
+     *      while all supported tokens are $1 stablecoins.
+     * @param amountIn  Principal amount (USD-equivalent for stablecoins)
+     * @return fibFee   Fee denominated in FIB tokens
+     */
+    function calculateFeeInFIB(uint256 amountIn) public view returns (uint256) {
+        // TODO: swap this for oracle conversion after PriceOracle.sol is deployed
+        return calculateFee(amountIn);
+    }
+
+    // ─────────────────────────────────────────────
+    // FEE COLLECTION
+    // ─────────────────────────────────────────────
+
+    /**
+     * @notice Collect and distribute a FIB fee from a completed slot.
+     * @dev Called by SlottingEngine after every successful slot.
+     *      ONLY accepts FIB — reverts if any other token is passed.
+     * @param token      Must be fibToken address
+     * @param feeAmount  Total FIB fee to distribute
      */
     function collectAndDistribute(address token, uint256 feeAmount)
         external onlyRole(COLLECTOR_ROLE) nonReentrant
     {
-        require(feeAmount > 0, "FeeEngine: zero fee");
+        require(feeAmount > 0,               "FeeEngine: zero fee");
+        require(token == address(fibToken),  "FeeEngine: only FIB fees accepted");
 
         uint256 toBurn     = (feeAmount * burnShare)     / 100;
         uint256 toTreasury = (feeAmount * treasuryShare) / 100;
@@ -104,26 +134,23 @@ contract FeeEngine is AccessControl, ReentrancyGuard {
         totalFeesToTreasury += toTreasury;
         totalFeesToLPs      += toLPs;
 
-        // 20% — Burn (only works if fee token is FIB)
-        if (token == address(fibToken) && toBurn > 0) {
+        // 20% — Burn via FIBToken.burnFee()
+        if (toBurn > 0) {
             fibToken.burnFee(toBurn);
-        } else if (toBurn > 0) {
-            // If fee is in another token, send burn portion to dead address
-            IERC20(token).safeTransfer(address(0x000000000000000000000000000000000000dEaD), toBurn);
         }
 
         // 40% — Treasury
         if (toTreasury > 0) {
-            IERC20(token).safeTransfer(treasury, toTreasury);
+            IERC20(address(fibToken)).safeTransfer(treasury, toTreasury);
         }
 
-        // 40% — LPs via LiquidityPool
+        // 40% — LPs via LiquidityPool.distributeFee()
         if (toLPs > 0) {
-            IERC20(token).forceApprove(address(liquidityPool), toLPs);
-            liquidityPool.distributeFee(token, toLPs);
+            IERC20(address(fibToken)).forceApprove(address(liquidityPool), toLPs);
+            liquidityPool.distributeFee(address(fibToken), toLPs);
         }
 
-        emit FeeCollected(token, feeAmount, toBurn, toTreasury, toLPs);
+        emit FeeCollected(feeAmount, toBurn, toTreasury, toLPs);
     }
 
     // ─────────────────────────────────────────────
@@ -131,7 +158,7 @@ contract FeeEngine is AccessControl, ReentrancyGuard {
     // ─────────────────────────────────────────────
 
     function setFeeRate(uint256 newRateBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newRateBps <= 100, "FeeEngine: max 1%"); // max 1% fee
+        require(newRateBps <= 100, "FeeEngine: max 1%");
         feeRateBps = newRateBps;
         emit FeeRateUpdated(newRateBps);
     }

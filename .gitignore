@@ -6,3 +6,5 @@ deployedAddresses.json
 coverage/
 coverage.json
 typechain-types/
+feed-addresses.json
+.next/

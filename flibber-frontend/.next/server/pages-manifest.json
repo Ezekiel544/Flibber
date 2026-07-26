@@ -2,9 +2,7 @@
   "/_app": "pages/_app.js",
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
-  "/": "pages/index.js",
-  "/governance": "pages/governance.js",
-  "/dashboard": "pages/dashboard.js",
-  "/stake": "pages/stake.js",
-  "/pool": "pages/pool.js"
+  "/admin": "pages/admin.js",
+  "/faucet": "pages/faucet.js",
+  "/": "pages/index.js"
 }

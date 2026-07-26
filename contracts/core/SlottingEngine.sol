@@ -8,38 +8,13 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./LiquidityPool.sol";
 import "./FeeEngine.sol";
+import "./PriceOracle.sol";
 
-/**
- * @title SlottingEngine
- * @notice The core FLIBBER primitive — instant cross-asset / cross-chain matching
- *
- * HOW A SLOT WORKS:
- *  1. User calls requestSlot(tokenIn, amountIn, tokenOut, recipient)
- *  2. SlottingEngine takes tokenIn from user
- *  3. Checks pool has enough tokenOut
- *  4. Calculates fee (paid in tokenIn or FIB)
- *  5. Fulfills slot: sends tokenOut to recipient immediately
- *  6. Reimburses pool with tokenIn (minus fee)
- *  7. FeeEngine distributes fee: 40% LPs / 40% treasury / 20% burned
- *
- * SOLVER FLOW (off-chain solvers can also fill slots):
- *  1. Solver calls solverFillSlot(slotId, ...) to fill a pending slot
- *  2. Solver earns solver reward from fee
- *  3. Faster solvers win — competitive filling
- *
- * VALUE PRESERVATION:
- *  Principal is never touched. Fee is charged SEPARATELY in $FIB.
- *  If user pays fee in $FIB → receives 100% of tokenOut amount.
- */
 contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
-    bytes32 public constant SOLVER_ROLE     = keccak256("SOLVER_ROLE");
-    bytes32 public constant OPERATOR_ROLE   = keccak256("OPERATOR_ROLE");
-
-    // ─────────────────────────────────────────────
-    // STRUCTS
-    // ─────────────────────────────────────────────
+    bytes32 public constant SOLVER_ROLE   = keccak256("SOLVER_ROLE");
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
     enum SlotStatus { PENDING, FILLED, CANCELLED, EXPIRED }
 
@@ -48,34 +23,31 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
         address tokenIn;
         uint256 amountIn;
         address tokenOut;
-        uint256 amountOut;   // expected out (set at request time)
+        uint256 amountOut;   // calculated on-chain by oracle
         address recipient;
-        uint256 feeAmount;   // fee in FIB or tokenIn
-        address feeToken;
+        uint256 feeAmount;   // always in FIB
         SlotStatus status;
         uint256 createdAt;
         uint256 filledAt;
-        address filledBy;    // address(0) = pool, else solver address
-        uint32  destChainId; // 0 = same chain, >0 = cross-chain via LayerZero
+        address filledBy;
+        uint32  destChainId;
     }
-
-    // ─────────────────────────────────────────────
-    // STATE
-    // ─────────────────────────────────────────────
 
     LiquidityPool public immutable pool;
     FeeEngine     public immutable feeEngine;
+    PriceOracle   public           oracle;   // upgradeable in case of oracle redeploy
     address       public immutable fibToken;
+
+    // Slippage protection — default 1% max slippage
+    uint256 public maxSlippageBps = 100;
 
     uint256 public slotCounter;
     uint256 public slotExpiry = 5 minutes;
 
     mapping(uint256 => SlotRequest) public slots;
     mapping(address => uint256[])   public userSlots;
-
-    // ─────────────────────────────────────────────
-    // EVENTS
-    // ─────────────────────────────────────────────
+    // token → decimals cache
+    mapping(address => uint8)       public tokenDecimals;
 
     event SlotRequested(
         uint256 indexed slotId,
@@ -85,86 +57,94 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
         address tokenOut,
         uint256 amountOut,
         address recipient,
+        uint256 fibFee,
         uint32  destChainId
     );
-    event SlotFilled(
-        uint256 indexed slotId,
-        address indexed filledBy,
-        uint256 amountOut,
-        uint256 fee
-    );
+    event SlotFilled(uint256 indexed slotId, address indexed filledBy, uint256 amountOut, uint256 fibFee);
     event SlotCancelled(uint256 indexed slotId);
-    event SlotExpired(uint256 indexed slotId);
-
-    // ─────────────────────────────────────────────
-    // CONSTRUCTOR
-    // ─────────────────────────────────────────────
+    event OracleUpdated(address newOracle);
 
     constructor(
         address _pool,
         address _feeEngine,
-        address _fibToken
+        address _fibToken,
+        address _oracle
     ) {
-        require(_pool       != address(0), "Slot: zero pool");
-        require(_feeEngine  != address(0), "Slot: zero feeEngine");
-        require(_fibToken   != address(0), "Slot: zero fibToken");
+        require(_pool      != address(0), "Slot: zero pool");
+        require(_feeEngine != address(0), "Slot: zero feeEngine");
+        require(_fibToken  != address(0), "Slot: zero fibToken");
+        require(_oracle    != address(0), "Slot: zero oracle");
 
         pool      = LiquidityPool(_pool);
         feeEngine = FeeEngine(_feeEngine);
         fibToken  = _fibToken;
+        oracle    = PriceOracle(_oracle);
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(OPERATOR_ROLE,      msg.sender);
     }
 
-    // ─────────────────────────────────────────────
-    // USER ACTIONS
-    // ─────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    // REGISTER TOKEN DECIMALS
+    // Must be called for each supported token before it can be slotted
+    // ─────────────────────────────────────────────────────────────
+    function setTokenDecimals(address token, uint8 decimals)
+        external onlyRole(OPERATOR_ROLE)
+    {
+        tokenDecimals[token] = decimals;
+    }
 
-    /**
-     * @notice Request a slot — deposit tokenIn, receive tokenOut
-     * @param tokenIn     Asset user is depositing
-     * @param amountIn    Amount of tokenIn
-     * @param tokenOut    Asset user wants to receive
-     * @param amountOut   Minimum amount of tokenOut expected
-     * @param recipient   Who receives tokenOut (can be different address/chain)
-     * @param payFeeInFIB If true, fee charged in $FIB (preserves 100% principal)
-     * @param destChainId Destination chain (0 = same chain)
-     * @return slotId     The unique slot identifier
-     */
+    // ─────────────────────────────────────────────────────────────
+    // QUOTE — read-only, call from frontend to show user amountOut
+    // ─────────────────────────────────────────────────────────────
+    function quoteSlot(
+        address tokenIn,
+        uint256 amountIn,
+        address tokenOut
+    ) external view returns (uint256 amountOut, uint256 fibFee) {
+        uint8 decIn  = tokenDecimals[tokenIn];
+        uint8 decOut = tokenDecimals[tokenOut];
+        amountOut = oracle.getAmountOut(tokenIn, amountIn, decIn, tokenOut, decOut);
+        fibFee    = feeEngine.calculateFee(amountIn);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // REQUEST SLOT
+    // amountOut is now calculated ON-CHAIN — user supplies minAmountOut
+    // for slippage protection only
+    // ─────────────────────────────────────────────────────────────
     function requestSlot(
         address tokenIn,
         uint256 amountIn,
         address tokenOut,
-        uint256 amountOut,
+        uint256 minAmountOut, // slippage protection — revert if oracle gives less
         address recipient,
-        bool    payFeeInFIB,
         uint32  destChainId
     ) external nonReentrant whenNotPaused returns (uint256 slotId) {
-        require(amountIn  > 0,            "Slot: zero amountIn");
-        require(amountOut > 0,            "Slot: zero amountOut");
-        require(recipient != address(0),  "Slot: zero recipient");
-        require(tokenIn   != tokenOut,    "Slot: same token");
+        require(amountIn     > 0,           "Slot: zero amountIn");
+        require(minAmountOut > 0,           "Slot: zero minAmountOut");
+        require(recipient    != address(0), "Slot: zero recipient");
+        require(tokenIn      != tokenOut,   "Slot: same token");
 
-        uint256 fee;
-        address feeToken;
+        // Calculate exact amountOut on-chain using oracle
+        uint8  decIn  = tokenDecimals[tokenIn];
+        uint8  decOut = tokenDecimals[tokenOut];
+        uint256 amountOut = oracle.getAmountOut(tokenIn, amountIn, decIn, tokenOut, decOut);
 
-        if (payFeeInFIB) {
-            // Fee paid in FIB — principal fully preserved
-            fee      = feeEngine.calculateFee(amountIn);
-            feeToken = fibToken;
-            IERC20(fibToken).safeTransferFrom(msg.sender, address(feeEngine), fee);
-        } else {
-            // Fee deducted from principal
-            fee      = feeEngine.calculateFee(amountIn);
-            feeToken = tokenIn;
-        }
+        // Slippage check — protect user from price movement between quote and tx
+        require(amountOut >= minAmountOut, "Slot: slippage too high");
 
-        // Pull tokenIn from user
+        // Calculate FIB fee
+        uint256 fibFee = feeEngine.calculateFee(amountIn);
+        require(fibFee > 0, "Slot: zero fee");
+
+        // Pull FIB fee from user
+        IERC20(fibToken).safeTransferFrom(msg.sender, address(this), fibFee);
+
+        // Pull full tokenIn principal from user
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
         slotId = ++slotCounter;
-
         slots[slotId] = SlotRequest({
             user:        msg.sender,
             tokenIn:     tokenIn,
@@ -172,8 +152,7 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
             tokenOut:    tokenOut,
             amountOut:   amountOut,
             recipient:   recipient,
-            feeAmount:   fee,
-            feeToken:    feeToken,
+            feeAmount:   fibFee,
             status:      SlotStatus.PENDING,
             createdAt:   block.timestamp,
             filledAt:    0,
@@ -182,112 +161,83 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
         });
 
         userSlots[msg.sender].push(slotId);
+        emit SlotRequested(slotId, msg.sender, tokenIn, amountIn, tokenOut, amountOut, recipient, fibFee, destChainId);
 
-        emit SlotRequested(slotId, msg.sender, tokenIn, amountIn, tokenOut, amountOut, recipient, destChainId);
-
-        // Attempt immediate pool fill (same chain)
         if (destChainId == 0) {
             _tryPoolFill(slotId);
         }
     }
 
-    /**
-     * @notice Cancel a pending slot and get tokenIn refunded
-     * @param slotId The slot to cancel
-     */
+    // ─────────────────────────────────────────────────────────────
+    // CANCEL
+    // ─────────────────────────────────────────────────────────────
     function cancelSlot(uint256 slotId) external nonReentrant {
         SlotRequest storage s = slots[slotId];
-        require(s.user   == msg.sender,        "Slot: not owner");
-        require(s.status == SlotStatus.PENDING, "Slot: not pending");
+        require(s.user   == msg.sender,         "Slot: not owner");
+        require(s.status == SlotStatus.PENDING,  "Slot: not pending");
 
         s.status = SlotStatus.CANCELLED;
-
-        // Refund tokenIn (minus fee if fee was in tokenIn)
-        uint256 refund = s.amountIn;
-        if (s.feeToken == s.tokenIn) refund -= s.feeAmount;
-
-        IERC20(s.tokenIn).safeTransfer(msg.sender, refund);
+        IERC20(s.tokenIn).safeTransfer(msg.sender, s.amountIn);
+        if (s.feeAmount > 0) {
+            IERC20(fibToken).safeTransfer(msg.sender, s.feeAmount);
+        }
         emit SlotCancelled(slotId);
     }
 
-    // ─────────────────────────────────────────────
-    // SOLVER INTERFACE
-    // ─────────────────────────────────────────────
-
-    /**
-     * @notice Solver fills a pending slot directly (competitive filling)
-     * @dev Solver fronts tokenOut, earns solver reward from fee
-     * @param slotId The slot to fill
-     */
+    // ─────────────────────────────────────────────────────────────
+    // SOLVER FILL
+    // ─────────────────────────────────────────────────────────────
     function solverFillSlot(uint256 slotId)
         external onlyRole(SOLVER_ROLE) nonReentrant whenNotPaused
     {
         SlotRequest storage s = slots[slotId];
-        require(s.status    == SlotStatus.PENDING,              "Slot: not pending");
-        require(block.timestamp <= s.createdAt + slotExpiry,    "Slot: expired");
+        require(s.status == SlotStatus.PENDING,              "Slot: not pending");
+        require(block.timestamp <= s.createdAt + slotExpiry, "Slot: expired");
 
         s.status   = SlotStatus.FILLED;
         s.filledAt = block.timestamp;
         s.filledBy = msg.sender;
 
-        // Solver sends tokenOut to recipient
         IERC20(s.tokenOut).safeTransferFrom(msg.sender, s.recipient, s.amountOut);
+        IERC20(s.tokenIn).safeTransfer(address(pool), s.amountIn);
+        pool.reimburseSlot(s.tokenIn, s.amountIn);
 
-        // Engine sends tokenIn to pool (reimbursing solver via pool mechanism)
-        uint256 principalToPool = s.feeToken == s.tokenIn
-            ? s.amountIn - s.feeAmount
-            : s.amountIn;
-
-        IERC20(s.tokenIn).forceApprove(address(pool), principalToPool);
-        pool.reimburseSlot(s.tokenIn, principalToPool);
-
-        // Distribute fee
-        _distributeFee(s.feeToken, s.feeAmount);
+        if (s.feeAmount > 0) {
+            IERC20(fibToken).safeTransfer(address(feeEngine), s.feeAmount);
+            feeEngine.collectAndDistribute(fibToken, s.feeAmount);
+        }
 
         emit SlotFilled(slotId, msg.sender, s.amountOut, s.feeAmount);
     }
 
-    // ─────────────────────────────────────────────
-    // INTERNAL
-    // ─────────────────────────────────────────────
-
+    // ─────────────────────────────────────────────────────────────
+    // POOL FILL
+    // ─────────────────────────────────────────────────────────────
     function _tryPoolFill(uint256 slotId) internal {
         SlotRequest storage s = slots[slotId];
 
         uint256 poolBalance = pool.getPoolBalance(s.tokenOut);
-        if (poolBalance < s.amountOut) return; // pool insufficient — stays PENDING for solver
+        if (poolBalance < s.amountOut) return;
 
         s.status   = SlotStatus.FILLED;
         s.filledAt = block.timestamp;
-        s.filledBy = address(0); // filled by pool
+        s.filledBy = address(0);
 
-        // Fulfill: send tokenOut to recipient
         pool.fulfillSlot(s.tokenOut, s.amountOut, s.recipient);
+        IERC20(s.tokenIn).safeTransfer(address(pool), s.amountIn);
+        pool.reimburseSlot(s.tokenIn, s.amountIn);
 
-        // Reimburse pool with tokenIn
-        uint256 principalToPool = s.feeToken == s.tokenIn
-            ? s.amountIn - s.feeAmount
-            : s.amountIn;
-
-        IERC20(s.tokenIn).forceApprove(address(pool), principalToPool);
-        pool.reimburseSlot(s.tokenIn, principalToPool);
-
-        // Distribute fee
-        _distributeFee(s.feeToken, s.feeAmount);
+        if (s.feeAmount > 0) {
+            IERC20(fibToken).safeTransfer(address(feeEngine), s.feeAmount);
+            feeEngine.collectAndDistribute(fibToken, s.feeAmount);
+        }
 
         emit SlotFilled(slotId, address(0), s.amountOut, s.feeAmount);
     }
 
-    function _distributeFee(address feeToken, uint256 feeAmount) internal {
-        if (feeAmount == 0) return;
-        IERC20(feeToken).forceApprove(address(feeEngine), feeAmount);
-        feeEngine.collectAndDistribute(feeToken, feeAmount);
-    }
-
-    // ─────────────────────────────────────────────
-    // VIEW
-    // ─────────────────────────────────────────────
-
+    // ─────────────────────────────────────────────────────────────
+    // VIEWS
+    // ─────────────────────────────────────────────────────────────
     function getSlot(uint256 slotId) external view returns (SlotRequest memory) {
         return slots[slotId];
     }
@@ -298,15 +248,25 @@ contract SlottingEngine is AccessControl, ReentrancyGuard, Pausable {
 
     function isSlotFillable(uint256 slotId) external view returns (bool) {
         SlotRequest storage s = slots[slotId];
-        if (s.status != SlotStatus.PENDING)                    return false;
-        if (block.timestamp > s.createdAt + slotExpiry)        return false;
-        if (pool.getPoolBalance(s.tokenOut) < s.amountOut)     return false;
+        if (s.status != SlotStatus.PENDING)                return false;
+        if (block.timestamp > s.createdAt + slotExpiry)   return false;
+        if (pool.getPoolBalance(s.tokenOut) < s.amountOut) return false;
         return true;
     }
 
-    // ─────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
     // ADMIN
-    // ─────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    function setOracle(address _oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_oracle != address(0), "Slot: zero oracle");
+        oracle = PriceOracle(_oracle);
+        emit OracleUpdated(_oracle);
+    }
+
+    function setMaxSlippage(uint256 _bps) external onlyRole(OPERATOR_ROLE) {
+        require(_bps <= 500, "Slot: max 5%");
+        maxSlippageBps = _bps;
+    }
 
     function setSlotExpiry(uint256 _expiry) external onlyRole(OPERATOR_ROLE) {
         require(_expiry >= 1 minutes && _expiry <= 1 hours, "Slot: invalid expiry");

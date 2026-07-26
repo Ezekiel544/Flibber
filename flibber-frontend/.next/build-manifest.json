@@ -27,25 +27,15 @@
       "static/chunks/main.js",
       "static/chunks/pages/_error.js"
     ],
-    "/dashboard": [
+    "/admin": [
       "static/chunks/webpack.js",
       "static/chunks/main.js",
-      "static/chunks/pages/dashboard.js"
+      "static/chunks/pages/admin.js"
     ],
-    "/governance": [
+    "/faucet": [
       "static/chunks/webpack.js",
       "static/chunks/main.js",
-      "static/chunks/pages/governance.js"
-    ],
-    "/pool": [
-      "static/chunks/webpack.js",
-      "static/chunks/main.js",
-      "static/chunks/pages/pool.js"
-    ],
-    "/stake": [
-      "static/chunks/webpack.js",
-      "static/chunks/main.js",
-      "static/chunks/pages/stake.js"
+      "static/chunks/pages/faucet.js"
     ]
   },
   "ampFirstPages": []
