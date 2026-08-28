@@ -2,7 +2,9 @@
   "/_app": "pages/_app.js",
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
-  "/admin": "pages/admin.js",
-  "/faucet": "pages/faucet.js",
-  "/": "pages/index.js"
+  "/": "pages/index.js",
+  "/history": "pages/history.js",
+  "/dashboard": "pages/dashboard.js",
+  "/pool": "pages/pool.js",
+  "/faucet": "pages/faucet.js"
 }

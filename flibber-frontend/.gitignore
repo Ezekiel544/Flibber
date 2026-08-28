@@ -1,0 +1,10 @@
+node_modules/
+.env
+artifacts/
+cache/
+deployedAddresses.json
+coverage/
+coverage.json
+typechain-types/
+feed-addresses.json
+.next/

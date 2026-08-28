@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { CONTRACTS, FIB_ABI, STAKING_ABI, POOL_ABI, SLOTTING_ABI, SUPPORTED_TOKENS } from '../lib/contracts'
+import { supabase } from '../lib/supabaseClient'
 
 const ADMIN_WALLETS = [
   "0xa388C71f0D69d33455cf25f6c71F7eA37f98745B",
@@ -16,6 +17,7 @@ const NAV_SECTIONS = [
   { id: 'overview',    label: 'Dashboard',           group: 'OVERVIEW' },
   { id: 'slots',       label: 'Slotting Operations', group: 'OPERATIONS' },
   { id: 'pools',       label: 'Pools',               group: 'OPERATIONS' },
+  { id: 'tasks',       label: 'Faucet Tasks',        group: 'OPERATIONS' },
   { id: 'users',       label: 'Users',               group: 'ACCOUNTS' },
   { id: 'treasury',    label: 'Treasury',            group: 'ACCOUNTS' },
   { id: 'contracts',   label: 'Contracts',           group: 'ENGINE' },
@@ -82,6 +84,15 @@ export default function AdminPage({ account, provider, onConnect }) {
   const [lastUpd,   setLastUpd]   = useState(null)
   const [loading,   setLoading]   = useState(false)
 
+  // Faucet tasks
+  const [taskList,    setTaskList]    = useState([])
+  const [taskTitle,   setTaskTitle]   = useState('')
+  const [taskDesc,    setTaskDesc]    = useState('')
+  const [taskUrl,     setTaskUrl]     = useState('')
+  const [taskType,    setTaskType]    = useState('twitter')
+  const [taskLoading, setTaskLoading] = useState(false)
+  const [editingTask, setEditingTask] = useState(null)
+
   const intervalRef = useRef(null)
 
   useEffect(() => {
@@ -99,6 +110,10 @@ export default function AdminPage({ account, provider, onConnect }) {
     }
     return () => clearInterval(intervalRef.current)
   }, [provider, account, authorized, unlocked])
+
+  useEffect(() => {
+    if (activeNav === 'tasks' && authorized && unlocked) loadTasks()
+  }, [activeNav, authorized, unlocked])
 
   const handleUnlock = () => {
     const correct = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || 'flibber-admin'
@@ -184,6 +199,54 @@ export default function AdminPage({ account, provider, onConnect }) {
       setLastUpd(new Date())
     } catch(e) { console.error(e) }
     setLoading(false)
+  }
+
+  const loadTasks = async () => {
+    const { data } = await supabase.from('tasks').select('*').order('created_at', { ascending: false })
+    setTaskList(data || [])
+  }
+
+  const addTask = async () => {
+    if (!taskTitle || !taskUrl) return
+    setTaskLoading(true)
+    await supabase.from('tasks').insert({
+      title: taskTitle,
+      description: taskDesc,
+      url: taskUrl,
+      type: taskType,
+      task_date: new Date().toISOString().split('T')[0],
+      active: true,
+    })
+    setTaskTitle(''); setTaskDesc(''); setTaskUrl(''); setTaskType('twitter')
+    await loadTasks()
+    setTaskLoading(false)
+  }
+
+  const toggleTaskActive = async (id, active) => {
+    await supabase.from('tasks').update({ active: !active }).eq('id', id)
+    loadTasks()
+  }
+
+  const deleteTask = async (id) => {
+    if (!confirm('Delete this task permanently? This cannot be undone.')) return
+    const { error } = await supabase.from('tasks').delete().eq('id', id)
+    if (error) {
+      alert('Could not delete — this task may already have user completions linked to it. Try deactivating instead.')
+      return
+    }
+    loadTasks()
+  }
+
+  const updateTask = async () => {
+    if (!editingTask) return
+    await supabase.from('tasks').update({
+      title: editingTask.title,
+      description: editingTask.description,
+      url: editingTask.url,
+      type: editingTask.type,
+    }).eq('id', editingTask.id)
+    setEditingTask(null)
+    loadTasks()
   }
 
   const fmtDate = ts => ts ? new Date(Number(ts)*1000).toLocaleDateString([], { month:'short', year:'numeric' }) : '—'
@@ -434,6 +497,113 @@ export default function AdminPage({ account, provider, onConnect }) {
             </tbody>
           </table>
         </div>
+      </>
+    )
+
+    if (activeNav === 'tasks') return (
+      <>
+        <div style={{ ...S.card, marginBottom: '20px' }}>
+          <div style={{ fontSize: '13px', fontWeight: '600', color: '#E5E7EB', marginBottom: '16px' }}>Add New Task</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+            <input placeholder="Task title" value={taskTitle} onChange={e => setTaskTitle(e.target.value)}
+              style={{ padding: '10px 12px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none' }} />
+            <select value={taskType} onChange={e => setTaskType(e.target.value)}
+              style={{ padding: '10px 12px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none' }}>
+              <option value="twitter">Twitter</option>
+              <option value="telegram">Telegram</option>
+              <option value="discord">Discord</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <input placeholder="URL (https://...)" value={taskUrl} onChange={e => setTaskUrl(e.target.value)}
+            style={{ width: '100%', padding: '10px 12px', marginBottom: '10px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }} />
+          <input placeholder="Description (optional)" value={taskDesc} onChange={e => setTaskDesc(e.target.value)}
+            style={{ width: '100%', padding: '10px 12px', marginBottom: '14px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }} />
+          <button onClick={addTask} disabled={taskLoading || !taskTitle || !taskUrl}
+            style={{ padding: '10px 20px', borderRadius: '8px', background: '#fff', border: 'none', color: '#000', fontSize: '13px', fontWeight: '700', cursor: (taskLoading || !taskTitle || !taskUrl) ? 'not-allowed' : 'pointer', opacity: (taskLoading || !taskTitle || !taskUrl) ? 0.5 : 1 }}>
+            {taskLoading ? 'Adding...' : '+ Add Task'}
+          </button>
+          <div style={{ fontSize: '11px', color: '#6B7280', marginTop: '8px' }}>New tasks are added for today's date.</div>
+        </div>
+
+        <div style={{ ...S.card, padding: 0, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #1E2128' }}>
+                {['Title', 'Type', 'Date', 'Status', 'Action'].map(h => <th key={h} style={S.th}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {taskList.length === 0 ? (
+                <tr><td colSpan={5} style={{ ...S.td, textAlign: 'center', color: '#4B5563', padding: '40px' }}>No tasks yet</td></tr>
+              ) : taskList.map(t => (
+                <tr key={t.id}
+                  onMouseEnter={e => e.currentTarget.style.background = '#13161A'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                  <td style={S.td}>
+                    <a href={t.url} target="_blank" rel="noreferrer" style={{ color: '#E5E7EB', textDecoration: 'none', fontSize: '13px', fontWeight: '600' }}>{t.title}</a>
+                    {t.description && <div style={{ fontSize: '11px', color: '#6B7280', marginTop: '2px' }}>{t.description}</div>}
+                  </td>
+                  <td style={S.td}><span style={{ fontSize: '12px', color: '#9CA3AF', textTransform: 'capitalize' }}>{t.type}</span></td>
+                  <td style={S.td}><span style={{ fontSize: '12px', color: '#9CA3AF' }}>{t.task_date}</span></td>
+                  <td style={S.td}>
+                    <span style={S.badge(t.active ? 'rgba(34,197,94,0.15)' : 'rgba(107,114,128,0.15)', t.active ? '#22C55E' : '#6B7280')}>
+                      {t.active ? 'Active' : 'Inactive'}
+                    </span>
+                  </td>
+                  <td style={S.td}>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button onClick={() => setEditingTask(t)}
+                        style={{ padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '600', border: '1px solid #1E2128', background: '#111318', color: '#9CA3AF', cursor: 'pointer' }}>
+                        Edit
+                      </button>
+                      <button onClick={() => toggleTaskActive(t.id, t.active)}
+                        style={{ padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '600', border: '1px solid #1E2128', background: '#111318', color: '#9CA3AF', cursor: 'pointer' }}>
+                        {t.active ? 'Deactivate' : 'Activate'}
+                      </button>
+                      <button onClick={() => deleteTask(t.id)}
+                        style={{ padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '600', border: '1px solid rgba(239,68,68,0.2)', background: 'rgba(239,68,68,0.08)', color: '#EF4444', cursor: 'pointer' }}>
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {editingTask && (
+          <div style={{ position: 'fixed', inset: 0, zIndex: 600, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setEditingTask(null)}>
+            <div style={{ ...S.card, width: '90%', maxWidth: '420px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ fontSize: '13px', fontWeight: '600', color: '#E5E7EB', marginBottom: '16px' }}>Edit Task</div>
+              <input value={editingTask.title} onChange={e => setEditingTask({ ...editingTask, title: e.target.value })}
+                placeholder="Title"
+                style={{ width: '100%', padding: '10px 12px', marginBottom: '10px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }} />
+              <select value={editingTask.type} onChange={e => setEditingTask({ ...editingTask, type: e.target.value })}
+                style={{ width: '100%', padding: '10px 12px', marginBottom: '10px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }}>
+                <option value="twitter">Twitter</option>
+                <option value="telegram">Telegram</option>
+                <option value="discord">Discord</option>
+                <option value="other">Other</option>
+              </select>
+              <input value={editingTask.url} onChange={e => setEditingTask({ ...editingTask, url: e.target.value })}
+                placeholder="URL"
+                style={{ width: '100%', padding: '10px 12px', marginBottom: '10px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }} />
+              <input value={editingTask.description || ''} onChange={e => setEditingTask({ ...editingTask, description: e.target.value })}
+                placeholder="Description"
+                style={{ width: '100%', padding: '10px 12px', marginBottom: '14px', background: '#0D0F12', border: '1px solid #1E2128', borderRadius: '8px', color: '#fff', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }} />
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={updateTask} style={{ flex: 1, padding: '10px', borderRadius: '8px', background: '#fff', border: 'none', color: '#000', fontSize: '13px', fontWeight: '700', cursor: 'pointer' }}>
+                  Save
+                </button>
+                <button onClick={() => setEditingTask(null)} style={{ flex: 1, padding: '10px', borderRadius: '8px', background: '#111318', border: '1px solid #1E2128', color: '#9CA3AF', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </>
     )
 

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { CONTRACTS, FAUCET_ABI, FIB_ABI, SUPPORTED_TOKENS } from '../lib/contracts'
+import { useTasks } from '../hooks/useTasks'
 
 const MOCK_ABI = [
   "function faucet() external",
@@ -23,6 +24,15 @@ const TEST_TOKENS = [
   { symbol: 'DOGE',  name: 'Wrapped DOGE',    address: () => CONTRACTS.doge,  decimals: 8,  color: '#C2A633' },
 ]
 
+const TASK_VERB = {
+  twitter:  'Follow',
+  telegram: 'Join',
+  discord:  'Join',
+  social:   'Follow',
+  other:    'Open',
+}
+const taskVerb = (type) => TASK_VERB[type] || 'Open'
+
 export default function FaucetPage({ account, provider, onConnect }) {
   const [walletAddr,   setWalletAddr]   = useState(null)
   const [fibBalance,   setFibBalance]   = useState('0')
@@ -39,6 +49,14 @@ export default function FaucetPage({ account, provider, onConnect }) {
   const [claiming,     setClaiming]     = useState({})
   const [tokenTx,      setTokenTx]      = useState({})
   const [imgErr,       setImgErr]       = useState({})
+
+  // Daily tasks — gates the FIB claim button below
+  const { tasks, completedIds, allDone, markDone, loading: tasksLoading } = useTasks(walletAddr)
+
+  const handleTaskClick = (task) => {
+    window.open(task.url, '_blank', 'noopener,noreferrer')
+    markDone(task.id)
+  }
 
   useEffect(() => { if (provider && account) init() }, [provider, account])
 
@@ -106,7 +124,7 @@ export default function FaucetPage({ account, provider, onConnect }) {
   }
 
   const handleClaimFIB = async () => {
-    if (!walletAddr || !canClaim) return
+    if (!walletAddr || !canClaim || !allDone) return
     setLoading(true); setError(null); setTxHash(null)
     try {
       const { ethers } = await import('ethers')
@@ -191,6 +209,58 @@ export default function FaucetPage({ account, provider, onConnect }) {
         ))}
       </div>
 
+      {/* Daily tasks card */}
+      {walletAddr && (
+        <div style={S.card}>
+          <div style={{ fontSize: '11px', fontWeight: '700', color: 'var(--muted)', marginBottom: '14px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            Today's Tasks {allDone ? '✅ All Done' : `(${completedIds.length}/${tasks.length})`}
+          </div>
+          {tasksLoading ? (
+            <div style={{ fontSize: '12px', color: 'var(--muted)' }}>Loading tasks...</div>
+          ) : tasks.length === 0 ? (
+            <div style={{ fontSize: '12px', color: 'var(--muted)' }}>No tasks today — claim is open.</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {tasks.map(task => {
+                const done = completedIds.includes(task.id)
+                return (
+                  <div key={task.id} style={{
+                    display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 14px',
+                    background: done ? 'var(--bg2)' : 'rgba(0,255,135,0.03)',
+                    border: done ? '1px solid var(--border)' : '1px solid rgba(0,255,135,0.35)',
+                    borderRadius: '12px',
+                    boxShadow: done ? 'none' : '0 0 0 1px rgba(0,255,135,0.08), 0 0 14px rgba(0,255,135,0.12)',
+                    transition: 'all 0.2s',
+                  }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--white)' }}>
+                        {task.title}
+                      </div>
+                      {task.description && (
+                        <div style={{ fontSize: '11px', color: 'var(--muted)', marginTop: '2px' }}>{task.description}</div>
+                      )}
+                    </div>
+                    {done ? (
+                      <span style={{ fontSize: '11px', fontWeight: '700', color: 'var(--green)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        ✅ Done
+                      </span>
+                    ) : (
+                      <button onClick={() => handleTaskClick(task)} style={{
+                        padding: '8px 16px', borderRadius: '8px', fontSize: '12px', fontWeight: '800',
+                        border: '1px solid rgba(0,255,135,0.4)', background: 'rgba(0,255,135,0.12)',
+                        color: 'var(--green)', cursor: 'pointer', whiteSpace: 'nowrap',
+                      }}>
+                        {taskVerb(task.type)}
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* FIB claim card */}
       <div style={S.card}>
         <div style={{ ...S.row, marginBottom: '16px' }}>
@@ -239,19 +309,19 @@ export default function FaucetPage({ account, provider, onConnect }) {
             Connect Wallet
           </button>
         ) : (
-          <button onClick={handleClaimFIB} disabled={loading || !canClaim} style={{
+          <button onClick={handleClaimFIB} disabled={loading || !canClaim || !allDone} style={{
             width: '100%', padding: '14px', borderRadius: '12px', fontSize: '14px', fontWeight: '800',
             border: 'none', transition: 'all 0.2s',
-            cursor: (loading || !canClaim) ? 'not-allowed' : 'pointer',
-            background: canClaim ? 'var(--plat)' : 'rgba(255,255,255,0.04)',
-            color: canClaim ? 'var(--bg)' : 'var(--muted)',
+            cursor: (loading || !canClaim || !allDone) ? 'not-allowed' : 'pointer',
+            background: (canClaim && allDone) ? 'var(--plat)' : 'rgba(255,255,255,0.04)',
+            color: (canClaim && allDone) ? 'var(--bg)' : 'var(--muted)',
           }}>
-            {loading ? 'Claiming…' : canClaim ? '🚰 Claim 50 FIB' : `Come back in ${countdown}`}
+            {loading ? 'Claiming…' : !allDone ? '🔒 Complete tasks above' : canClaim ? '🚰 Claim 50 FIB' : `Come back in ${countdown}`}
           </button>
         )}
 
         <div style={{ textAlign: 'center', marginTop: '10px', fontSize: '11px', color: 'var(--muted)' }}>
-          🔒 1 claim per wallet per 24h · Enforced on-chain
+          🔒 1 claim per wallet per 24h · Tasks required · Enforced on-chain
         </div>
       </div>
 

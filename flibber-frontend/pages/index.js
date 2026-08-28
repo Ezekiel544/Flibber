@@ -99,7 +99,8 @@ export default function SlotPage({ account, provider, onConnect }) {
   }
 
   const tokenInBal       = parseFloat(balances[tokenIn.symbol] || '0')
-  const fibFeeNeeded     = amountIn ? parseFloat(amountIn) * 0.002 : 0
+  // ── Updated: 1% fee with 8 FIB minimum ──────────────────────────
+  const fibFeeNeeded     = amountIn ? Math.max(8, parseFloat(amountIn) * 0.01) : 0
   const hasEnoughFib     = fibBal >= fibFeeNeeded
   const hasEnoughTokenIn = amountIn ? tokenInBal >= parseFloat(amountIn) : false
   const noFib            = walletAddr && balancesLoaded && fibBal === 0
@@ -111,7 +112,7 @@ export default function SlotPage({ account, provider, onConnect }) {
     if (!walletAddr)             return setError('Connect your wallet first')
     if (!amountIn || !amountOut) return setError('Enter an amount first')
     if (!hasEnoughTokenIn)       return setError(`Insufficient ${tokenIn.symbol} balance.`)
-    if (!hasEnoughFib)           return setError(`You need at least ${fibFeeNeeded.toFixed(6)} FIB to cover the fee.`)
+    if (!hasEnoughFib)           return setError(`You need at least ${fibFeeNeeded.toFixed(2)} FIB to cover the fee.`)
     setLoading(true); setError(null); setTxHash(null)
     try {
       const { ethers }   = await import('ethers')
@@ -127,7 +128,11 @@ export default function SlotPage({ account, provider, onConnect }) {
 
       if (tokenIn.symbol !== 'FIB') {
         const fib          = new ethers.Contract(CONTRACTS.fibToken, FIB_ABI, signer)
-        const fibFeeRaw    = (BigInt(amtIn.toString()) * 20n) / 10000n
+        // ── Updated: 1% fee (100 bps) with 8 FIB minimum ──────────
+        const parsedAmt    = parseFloat(amountIn)
+        const pctFee       = (BigInt(amtIn.toString()) * 100n) / 10000n
+        const minFeeRaw    = ethers.parseEther('8')
+        const fibFeeRaw    = pctFee > minFeeRaw ? pctFee : minFeeRaw
         const fibAllowance = await fib.allowance(walletAddr, CONTRACTS.slottingEngine)
         if (BigInt(fibAllowance.toString()) < fibFeeRaw)
           await (await fib.approve(CONTRACTS.slottingEngine, ethers.MaxUint256)).wait()
@@ -139,7 +144,8 @@ export default function SlotPage({ account, provider, onConnect }) {
       setTxHash(receipt.hash)
 
       const parsedAmtIn  = parseFloat(amountIn)
-      const parsedFibFee = parsedAmtIn * 0.002
+      // ── Updated: optimistic fee deduction with minimum ──────────
+      const parsedFibFee = Math.max(8, parsedAmtIn * 0.01)
       setBalances(prev => ({
         ...prev,
         [tokenIn.symbol]:  Math.max(0, parseFloat(prev[tokenIn.symbol]  || '0') - parsedAmtIn).toFixed(4),
@@ -150,17 +156,31 @@ export default function SlotPage({ account, provider, onConnect }) {
       setAmountIn(''); setAmountOut(''); setUsdValue(null)
       setTimeout(() => loadBalances(walletAddr), 2000)
     } catch(e) {
-      if (e?.message?.includes('slippage') || e?.reason?.includes('slippage'))
-        setError('Price moved too much. Please try again.')
-      else if (e?.reason?.includes('not configured') || e?.message?.includes('not configured'))
-        setError('This token pair is not yet supported by the oracle.')
+      const msg = e?.reason || e?.data?.message || e?.message || ''
+      if (e?.code === 4001 || msg.includes('user rejected') || msg.includes('User rejected'))
+        setError('Transaction cancelled.')
+      else if (msg.includes('slippage'))
+        setError('Price moved during transaction. Please try again.')
+      else if (msg.includes('not configured'))
+        setError('This token pair is not supported yet.')
+      else if (msg.includes('CALL_EXCEPTION') || msg.includes('missing revert') || msg.includes('data=null'))
+        setError('Network error — please refresh the page and try again.')
+      else if (msg.includes('insufficient') || msg.includes('ERC20') || msg.includes('transfer amount'))
+        setError('Insufficient balance to complete this slot.')
+      else if (msg.includes('gas') || msg.includes('Gas'))
+        setError('Transaction failed due to gas. Please try again.')
+      else if (msg.includes('nonce'))
+        setError('Transaction conflict. Please refresh and try again.')
+      else if (msg.includes('pool') || msg.includes('liquidity'))
+        setError('Not enough liquidity in pool for this slot. Try a smaller amount.')
       else
-        setError(e?.reason || e?.data?.message || e?.message || 'Transaction failed')
+        setError('Something went wrong. Please try again.')
     }
     setLoading(false)
   }
 
-  const fee = amountIn ? (parseFloat(amountIn) * 0.002).toFixed(6) : '0'
+  // ── Updated: 1% fee with 8 FIB minimum ──────────────────────────
+  const fee = amountIn ? Math.max(8, parseFloat(amountIn) * 0.01).toFixed(6) : '0'
 
   const S = {
     page:   { minHeight: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '32px 16px 40px', position: 'relative', zIndex: 1 },
@@ -173,10 +193,9 @@ export default function SlotPage({ account, provider, onConnect }) {
     divVal: { fontSize: '13px', fontFamily: 'IBM Plex Mono, monospace', color: 'var(--silver)' },
   }
 
-  // ── Balance display — number smaller, symbol normal ─────────────
   const BalDisplay = ({ symbol }) => (
     <span style={{ fontFamily: 'IBM Plex Mono, monospace', color: 'var(--plat)', fontWeight: '500' }}>
-      <span style={{ fontSize: '11px' }}>
+      <span style={{ fontSize: '9px' }}>
         {balancesRefreshing ? '…' : (balances[symbol] || '0')}
       </span>
       {' '}
@@ -203,7 +222,7 @@ export default function SlotPage({ account, provider, onConnect }) {
       <div style={{ display: 'flex', gap: '8px', marginBottom: '28px', flexWrap: 'wrap', justifyContent: 'center' }}>
         {[
           { label: 'Total Slots', value: slotCount.toLocaleString() },
-          { label: 'Fee Rate',    value: '0.20% FIB' },
+          { label: 'Fee Rate',    value: '1% / min 8 FIB' },
           { label: 'Network',     value: 'Base Sepolia' },
           { label: 'Value Loss',  value: '0%' },
         ].map(s => (
@@ -219,7 +238,7 @@ export default function SlotPage({ account, provider, onConnect }) {
         <Banner type="warn" title="You need FIB to slot" body="All slot fees are paid in $FIB. Your wallet has 0 FIB." link="/faucet" />
       )}
       {balancesLoaded && lowFib && (
-        <Banner type="err" title="Not enough FIB for fee" body={`Need ${fibFeeNeeded.toFixed(6)} FIB · Have ${fibBal.toFixed(4)} FIB`} link="/faucet" />
+        <Banner type="err" title="Not enough FIB for fee" body={`Need ${fibFeeNeeded.toFixed(2)} FIB · Have ${fibBal.toFixed(4)} FIB`} link="/faucet" />
       )}
       {balancesLoaded && noTokenIn && (
         <Banner type="err" title={`Insufficient ${tokenIn.symbol}`} body={`You have ${tokenInBal.toFixed(4)} ${tokenIn.symbol} but need ${parseFloat(amountIn||0).toFixed(4)}`} link="/faucet" />
@@ -305,10 +324,10 @@ export default function SlotPage({ account, provider, onConnect }) {
         {amountIn && (
           <div style={{ padding: '12px 16px', background: 'rgba(0,255,135,0.03)', border: '1px solid rgba(0,255,135,0.08)', borderRadius: '12px', marginBottom: '16px' }}>
             {[
-              ['Protocol fee (0.20%)', `${fee} FIB`],
-              ['Your FIB balance',     `${fibBal.toFixed(4)} FIB`],
-              ['Slippage tolerance',   '1.00%'],
-              ['Value preserved',      '100% ✓'],
+              ['Protocol fee (1% / min 8 FIB)', `${fee} FIB`],
+              ['Your FIB balance',              `${fibBal.toFixed(4)} FIB`],
+              ['Slippage tolerance',            '1.00%'],
+              ['Value preserved',               '100% ✓'],
             ].map(([k, v], i) => (
               <div key={k} style={{ ...S.row, marginBottom: i < 3 ? '6px' : 0 }}>
                 <span style={S.divKey}>{k}</span>
@@ -371,9 +390,9 @@ export default function SlotPage({ account, provider, onConnect }) {
       {/* Info cards */}
       <div style={{ display: 'flex', gap: '10px', marginTop: '24px', flexWrap: 'wrap', justifyContent: 'center', width: '100%', maxWidth: '480px' }}>
         {[
-          { icon: '', title: 'Instant',    desc: '~3-10 second fills' },
-          { icon: '', title: '100% Value', desc: 'Fee paid in FIB'    },
-          { icon: '', title: 'Live Price', desc: 'Chainlink oracle'    },
+          { icon: '⚡', title: 'Instant',    desc: '~3-10 second fills' },
+          { icon: '🔒', title: '100% Value', desc: 'Min 8 FIB fee'     },
+          { icon: '🔮', title: 'Live Price', desc: 'Chainlink oracle'   },
         ].map(c => (
           <div key={c.title} style={{ flex: 1, minWidth: '110px', padding: '14px', borderRadius: '12px', background: 'var(--card)', border: '1px solid var(--border)', textAlign: 'center' }}>
             <div style={{ fontSize: '18px', marginBottom: '5px' }}>{c.icon}</div>
